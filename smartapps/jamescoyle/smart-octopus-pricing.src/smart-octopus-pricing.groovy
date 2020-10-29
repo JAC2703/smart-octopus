@@ -53,6 +53,7 @@ preferences {
 
 def getApiBase() { return "https://api.octopus.energy" }
 def getApiPricingCall() { return "${getApiBase()}/v1/products/AGILE-18-02-21/electricity-tariffs/E-1R-AGILE-18-02-21-${settings.elecRegion}/standard-unit-rates/" }
+def getDeviceIdPricing() { return "octo-agile-price-device" }
 
 def elecRegions() {
     // If anyone knows how to get the value of an enum, and not it's index... call me. Otherwise we're doing this. 
@@ -68,6 +69,9 @@ def installed() {
     schedule("0 */30 * * * ?", checkPricesSchedule)
 }
 
+def uninstalled() {
+    removeChildDevices()
+}
 
 def updated() {
 	log.debug "Updated with settings: ${settings}"
@@ -78,6 +82,7 @@ def updated() {
 def initialize() {
     setStates()
     setSwitchRates()
+    createChildDevices()
     
     getPricesFirstTime()
     checkPricesFirstTime()
@@ -121,6 +126,22 @@ def setSwitchRates() {
     state.switches = switches
     
     log.info "${switches.size()} switches added"
+}
+
+def createChildDevices() {
+    def existingChildDevices = getChildDevices()
+    
+    if(existingChildDevices.size() > 0) {
+        removeChildDevices()
+    }
+    
+    //def priceDevice =  addChildDevice(app.namespace, "Octopus Agile Pricing", getDeviceIdPricing(), null, ["name": "Octopus Agile Pricing", "label": "Octopus Agile Pricing", "completedSetup": true])
+    //log.info "Created child device handler for price {$priceDevice}"
+
+}
+
+private removeChildDevices() {
+    getAllChildDevices().each { deleteChildDevice(it.deviceNetworkId) }
 }
 
 /* Get prices and store in state */
