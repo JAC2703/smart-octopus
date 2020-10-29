@@ -160,9 +160,13 @@ def getPricesFirstTime() {
 
 def getPricesSchedule() {
     log.debug "Getting prices from API"
-    
-    processGetPrices()
 
+    if(state.agilePrices.size() < 14) {
+        processGetPrices()
+    }
+    else{
+        log.debug "${state.agilePrices.size()} prices are already in cache"
+    }
 }
 
 def processGetPrices() {
@@ -176,7 +180,7 @@ def processGetPrices() {
         log.debug "Fetched ${prices.results.size()} new pricing intervals"
         state.agilePrices = prices.results
     }
-    
+
 }
 
 def getPricesFromAPI() {
@@ -206,12 +210,9 @@ def checkPricesFirstTime() {
 
 def checkPricesSchedule() {
     log.debug "Checking prices"
-    
-    if(state.agilePrices.size() < 14) {
-      checkPrices()
-    }
-    else{
-        log.debug "${state.agilePrices.size()} prices are already in cache"
+
+    if(state.switches.size() > 0) {
+        checkPrices()
     }
 }
 
