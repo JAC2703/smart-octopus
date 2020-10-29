@@ -149,24 +149,24 @@ private removeChildDevices() {
 /* Get prices and store in state */
 def getPricesFirstTime() {
     if(state.agilePrices.size() == 0){
-      log.debug "Getting prices for the first time"
+      log.debug "Getting price data for the first time"
     
       processGetPrices()
     }
     else{
-        log.debug "Skipping getting prices"
+        log.debug "Skipping getting price data from API"
     }
 
 }
 
 def getPricesSchedule() {
-    log.debug "Getting prices from API"
+    log.debug "Getting price data from API"
 
     if(state.agilePrices.size() < 14) {
         processGetPrices()
     }
     else{
-        log.debug "${state.agilePrices.size()} prices are already in cache"
+        log.debug "${state.agilePrices.size()} price data is already in cache"
     }
 }
 
@@ -174,7 +174,7 @@ def processGetPrices() {
     def prices = getPricesFromAPI()
     
     if(prices == []) {
-        log.error "No prices returned from API. See previous errors."
+        log.error "No price data returned from API. See previous errors."
         state.agilePrices = []
     }
     else{
@@ -186,7 +186,7 @@ def processGetPrices() {
 
 def getPricesFromAPI() {
     def dateFrom = new Date().format("yyyy-MM-dd'T'HH:'00Z'", TimeZone.getTimeZone('UTC'))
-    log.debug "Getting prices from API from ${dateFrom}"
+    log.debug "Getting price data from API from ${dateFrom}"
 
     def url = "${getApiPricingCall()}?period_from=${dateFrom}"
 
@@ -254,12 +254,12 @@ def checkPrices() {
                     turnOn.add(device)
                 }
                 else{
-                    log.debug "Setting device ${device} OFF as price ${state.agileCurrentPrice} is below threshold ${thresholdPrice}"
+                    log.debug "Setting device ${device} OFF as price ${state.agileCurrentPrice} is above threshold ${thresholdPrice}"
                     turnOff.add(device)
                 }
             }
             
-            log.info "Ensuring ${turnOn.size()} devices are ON and ${turnOff.size()} devices are OFF at price ${state.agileCurrentPrice}"
+            log.info "Ensuring ${turnOn.size()} device(s) are ON and ${turnOff.size()} device(s) are OFF at price ${state.agileCurrentPrice}"
             
             turnOffDevices(turnOff)
             turnOnDevices(turnOn)
@@ -320,18 +320,22 @@ def findDevice(id) {
 }
 
 def turnOnDevices(turnOn) {
-    log.debug "Turning ON ${turnOn.size()} devices"
+    log.debug "Ensuring ${turnOn.size()} device(s) are ON"
 	turnOn.each {s -> 
-        log.debug "Turning ON ${s}"
-        s.on()
+        if(!s.latestValue("switch").contains('on')) {
+        	log.debug "Turning ON ${s} from ${s.latestValue("switch").capitalize()}"
+        	s.on()
+        }
     }
 }
 
 def turnOffDevices(turnOff) {
-    log.debug "Turning OFF ${turnOff.size()} devices"
+    log.debug "Ensuring ${turnOff.size()} device(s) are OFF"
 	turnOff.each { s -> 
-        log.debug "Turning OFF ${s}"
-        s.off()
+        if(!s.latestValue("switch").contains('off')) {
+            log.debug "Turning OFF ${s} from ${s.latestValue("switch").capitalize()}"
+            s.off()
+        }
     }
 }
 
