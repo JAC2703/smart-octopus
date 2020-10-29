@@ -19,8 +19,8 @@
  */
 
 definition(
-    name: "Smart Octopus: Pricing",
-    namespace: "net.jamescoyle.smartoctopus",
+    name: "Smart Octopus Pricing",
+    namespace: "jamescoyle",
     author: "James Coyle",
     description: "Control devices based on Octopus Agile pricing",
     category: "My Apps",
