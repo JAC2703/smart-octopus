@@ -33,11 +33,17 @@ preferences {
 	section("Electricity region code:") {
 		input "elecRegion", title: "Select region", "enum", options: elecRegions(), required: true
 	}
-	section("When prices plunge, turn these devies on (and off when they, uh, unplunge):") {
-		input "plungeSwitches", "capability.switch", Title: "Choose switches", multiple: true, required: false
+	section("Plunge Pricing") {
+		input "plungeSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
+        input "notifyPlunge", title: "Yes/ No?", "enum", options: ["Yes": "Yes", "No": "No"], defaultValue: "No", required: true
 	}
-    section("Notify on plunge?:") {
-		input "notifyPlunge", title: "Yes/ No?", "enum", options: ["Yes": "Yes", "No": "No"], defaultValue: "No", required: true
+    section("Cheap Pricing") {
+        input "cheapValue", "number", title: "When price is less than (x.xxp)", defaultValue: 5.1
+		input "cheapSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
+	}
+    section("Regular Pricing") {
+        input "regularValue", "number", title: "When price is less than (x.xxp)", defaultValue: 12.5
+		input "regularSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
 	}
 }
 
@@ -61,6 +67,7 @@ def updated() {
 
 def initialize() {
     setStates()
+    setSwitchRates()
     
     getPricesFirstTime()
     checkPricesFirstTime()
@@ -81,6 +88,35 @@ def setStateValue(s, v) {
     if(!state.containsKey(s)){
         state[s] = v
     }
+}
+
+def setSwitchRates() {
+    def switches = [:]
+    
+    plungeSwitches.each { s ->
+        def wrapper = [
+            device: s,
+            price: 0]
+        switches.put(s.getId(), wrapper)
+    }
+    
+    cheapSwitches.each { s ->
+        def wrapper = [
+            device: s,
+            price: cheapValue]
+        switches.put(s.getId(), wrapper)
+    }
+    
+    regularSwitches.each { s ->
+        def wrapper = [
+            device: s,
+            price: regularValue]
+        switches.put(s.getId(), wrapper)
+    }
+    
+    state.switches = switches
+    
+    log.info "${switches.size()} switches added"
 }
 
 /* Get prices and store in state */
@@ -112,7 +148,7 @@ def processGetPrices() {
         state.agilePrices = []
     }
     else{
-        log.debug "Fetched new pricing data"
+        log.debug "Fetched ${prices.results.size()} new pricing intervals"
         state.agilePrices = prices.results
     }
     
@@ -158,9 +194,8 @@ def checkPrices() {
     
     Date date = new Date()
     
-    Iterator i = state.agilePrices.iterator();
-    while (i.hasNext()) {
-        price = i.next()
+    def removePrices = []
+    state.agilePrices.each { price ->
         def fromDate = Date.parse("yyyy-MM-dd'T'HH:mm:ssz", price.valid_from.replaceAll('Z', '+0000'))
         def toDate = Date.parse("yyyy-MM-dd'T'HH:mm:ssz", price.valid_to.replaceAll('Z', '+0000'))
         def currentDate = new Date()
@@ -168,7 +203,7 @@ def checkPrices() {
         //log.debug "Checking ${currentDate} is between ${price.valid_from}...${fromDate} and ${price.valid_to}...${toDate}"
         
         if(currentDate > toDate){
-            i.remove()
+            removePrices.add(price)
         }
         else if(currentDate >= fromDate && currentDate < toDate) {
             log.info "Current Agile price is ${price.value_inc_vat}"
@@ -178,26 +213,35 @@ def checkPrices() {
                 state.agileCurrentPrice = price.value_inc_vat
             }
             
-            // Negative price? 
-            if(price.value_inc_vat < 0) {
-                // Plunge! 
-              state.lastPlungeFromDate = fromDate
-              state.lastPlungeToDate = toDate
-                
-                debug.log "Plunge! ${price.value_inc_vat}"
-                
-                turnOnPlungeDevices()
-                
-                sendPlungeNotification(price.value_inc_vat);
-            }
-            else{
-                // not in plunge
-                if(state.lastPlungeTurnedOff == false) {
-                    log.info "Turning off devices from plunge timeframe ${state.lastPlungeFromDate} to ${state.lastPlungeToDate}"
-                    turnOffPlungeDevices()
+            def turnOn = []
+            def turnOff = []
+            
+            state.switches.each { s -> 
+                if(s.value.price >= state.agileCurrentPrice){
+                    log.debug "Setting device ${s.value.device} ON as price ${state.agileCurrentPrice} is below threshold ${s.value.price}"
+                    turnOn.add(s.value.device)
+                }
+                else{
+                    log.debug "Setting device ${s.value.device} OFF as price ${state.agileCurrentPrice} is below threshold ${s.value.price}"
+                    turnOff.add(s.value.device)
                 }
             }
+            
+            log.info "Ensuring ${turnOn.size()} devices are ON and ${turnOff.size()} devices are OFF at price ${state.agileCurrentPrice}"
+            
+            turnOffDevices(turnOff)
+            turnOnDevices(turnOn)
+            
+            // Negative price? 
+            if(price.value_inc_vat < 0) {
+                log.info "Alerting plunge pricing!"
+                sendPlungeNotification(price.value_inc_vat);
+            }
         }
+    }
+    
+    if(removePrices.size() > 0) {
+        state.agilePrices.removeAll(removePrices)
     }
 }
 
@@ -217,22 +261,18 @@ def requestGET(path) {
 	}
 }
 
-def turnOnPlungeDevices() {
-	plungeSwitches.each {plungeSwitch -> 
-        log.debug "Turning on ${plungeSwitch}"
-        plungeSwitch.on()
+def turnOnDevices(turnOn) {
+	turnOn.each {s -> 
+        log.debug "Turning on ${s}"
+        s.on()
     }
-    
-    state.lastPlungeTurnedOff = false
 }
 
-def turnOffPlungeDevices() {
-	plungeSwitches.each { plungeSwitch -> 
-        log.debug "Turning off ${plungeSwitch}"
-        plungeSwitch.off()
+def turnOffDevices(turnOff) {
+	turnOff.each { s -> 
+        log.debug "Turning off ${s}"
+        s.off()
     }
-    
-    state.lastPlungeTurnedOff = true
 }
 
 def sendPlungeNotification(price){
