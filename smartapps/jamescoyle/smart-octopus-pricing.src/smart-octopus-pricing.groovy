@@ -141,12 +141,13 @@ def createChildDevices() {
 }
 
 private removeChildDevices() {
-    getAllChildDevices().each { deleteChildDevice(it.deviceNetworkId) }
+    getAllChildDevices().each { d ->
+        deleteChildDevice(d.deviceNetworkId)
+    }
 }
 
 /* Get prices and store in state */
 def getPricesFirstTime() {
-
     if(state.agilePrices.size() == 0){
       log.debug "Getting prices for the first time"
     
@@ -204,8 +205,10 @@ def getPricesFromAPI() {
 /* check known prices and do stuff */
 def checkPricesFirstTime() {
     log.debug "Checking prices for the first time"
-    
-    checkPrices()
+
+    if(state.switches.size() > 0) {
+        checkPrices()
+    }
 }
 
 def checkPricesSchedule() {
