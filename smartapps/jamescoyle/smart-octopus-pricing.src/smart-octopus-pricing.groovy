@@ -16,6 +16,7 @@
  *  Date: 2020-10-28
  *
  *  2020-10-28 Implemented ability to get pricing data with basic app framework 
+ *  2020-10-29 3 levels of price categories. Plunge (<= 0.00), Cheap (user set pricing) and Regular (user set pricing)
  */
 
 definition(
@@ -24,12 +25,15 @@ definition(
     author: "James Coyle",
     description: "Control devices based on Octopus Agile pricing",
     category: "My Apps",
-    iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
-    iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png",
-    iconX3Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png"
+    iconUrl: "https://www.jamescoyle.net/wp-content/uploads/2020/10/octo-logo-fav.png",
+    iconX2Url: "https://www.jamescoyle.net/wp-content/uploads/2020/10/octo-logo.png",
+    iconX3Url: "https://www.jamescoyle.net/wp-content/uploads/2020/10/octo-logo.png"
 )
 
 preferences {
+    section("Smart Octopus Pricing") {
+        paragraph "Configure which devices to turn on and off based on the below thresholds. The device will be turned on if the price is at or below the specified value and turned off when the price rises above it."
+    }
 	section("Electricity region code:") {
 		input "elecRegion", title: "Select region", "enum", options: elecRegions(), required: true
 	}
@@ -38,11 +42,11 @@ preferences {
         input "notifyPlunge", title: "Yes/ No?", "enum", options: ["Yes": "Yes", "No": "No"], defaultValue: "No", required: true
 	}
     section("Cheap Pricing") {
-        input "cheapValue", "number", title: "When price is less than (x.xxp)", defaultValue: 5.1
+        input "cheapValue", "number", title: "When price is less than (x.xxp)", defaultValue: 5, required: true
 		input "cheapSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
 	}
     section("Regular Pricing") {
-        input "regularValue", "number", title: "When price is less than (x.xxp)", defaultValue: 12.5
+        input "regularValue", "number", title: "When price is less than (x.xxp)", defaultValue: 12, required: true
 		input "regularSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
 	}
 }
@@ -56,6 +60,9 @@ def installed() {
 	log.debug "Installed with settings: ${settings}"
     
     initialize()
+    
+    schedule("30 50 * * * ?", getPricesSchedule)
+    schedule("0 */30 * * * ?", checkPricesSchedule)
 }
 
 
@@ -71,9 +78,6 @@ def initialize() {
     
     getPricesFirstTime()
     checkPricesFirstTime()
-    
-	schedule("30 50 * * * ?", getPricesSchedule)
-    schedule("0 */30 * * * ?", checkPricesSchedule)
 }
 
 def setStates() {
@@ -93,27 +97,24 @@ def setStateValue(s, v) {
 def setSwitchRates() {
     def switches = [:]
     
-    plungeSwitches.each { s ->
-        def wrapper = [
-            device: s,
-            price: 0]
-        switches.put(s.getId(), wrapper)
+    if(plungeSwitches != null) {
+        plungeSwitches.each { s ->
+            switches.put(s.getId(), 0)
+        }
     }
     
-    cheapSwitches.each { s ->
-        def wrapper = [
-            device: s,
-            price: cheapValue]
-        switches.put(s.getId(), wrapper)
+    if(cheapSwitches != null) {
+        cheapSwitches.each { s ->
+            switches.put(s.getId(), cheapValue)
+        }
     }
     
-    regularSwitches.each { s ->
-        def wrapper = [
-            device: s,
-            price: regularValue]
-        switches.put(s.getId(), wrapper)
+    if (regularSwitches != null) {
+        regularSwitches.each { s ->
+            switches.put(s.getId(), regularValue)
+        }
     }
-    
+
     state.switches = switches
     
     log.info "${switches.size()} switches added"
@@ -161,13 +162,14 @@ def getPricesFromAPI() {
     def url = "https://api.octopus.energy/v1/products/AGILE-18-02-21/electricity-tariffs/E-1R-AGILE-18-02-21-${settings.elecRegion}/standard-unit-rates/?period_from=${dateFrom}"
     
     def resp = requestGET(url)
-		if (resp.status == 200) {
-			return resp.data
-		} 
-        else {
-			log.error "Error calling API for prices. response code: ${resp.status}, data: ${resp.data}"
-			return []
-		}
+    
+    if (resp.status == 200) {
+        return resp.data
+    } 
+    else {
+        log.error "Error calling API for prices. response code: ${resp.status}, data: ${resp.data}"
+        return []
+    }
 }
 
 
@@ -217,13 +219,15 @@ def checkPrices() {
             def turnOff = []
             
             state.switches.each { s -> 
-                if(s.value.price >= state.agileCurrentPrice){
-                    log.debug "Setting device ${s.value.device} ON as price ${state.agileCurrentPrice} is below threshold ${s.value.price}"
-                    turnOn.add(s.value.device)
+            	def thresholdPrice = s.value
+                def device = findDevice(s.key)
+                if(thresholdPrice >= state.agileCurrentPrice){
+                    log.debug "Setting device ${device} ON as price ${state.agileCurrentPrice} is below threshold ${thresholdPrice}"
+                    turnOn.add(device)
                 }
                 else{
-                    log.debug "Setting device ${s.value.device} OFF as price ${state.agileCurrentPrice} is below threshold ${s.value.price}"
-                    turnOff.add(s.value.device)
+                    log.debug "Setting device ${device} OFF as price ${state.agileCurrentPrice} is below threshold ${thresholdPrice}"
+                    turnOff.add(device)
                 }
             }
             
@@ -261,16 +265,44 @@ def requestGET(path) {
 	}
 }
 
+/* TODO This is clunky and should be refactored. 
+ * It seems there isn't a way to look up a device from a single 'master' list (unless joining)
+ */ 
+def findDevice(id) {
+    if(plungeSwitches != null) {
+        def p = plungeSwitches.find{ it.id == id }
+        if(p != null) {
+            return p
+        }
+    }
+    
+    if (cheapSwitches != null) {
+        def c = cheapSwitches.find{ it.id == id }
+        if(c != null) {
+            return c
+        }
+    }
+    
+    if (regularSwitches != null) {
+        def r = regularSwitches.find{ it.id == id }
+        if(r != null) {
+            return r
+        }
+    }
+}
+
 def turnOnDevices(turnOn) {
+    log.debug "Turning ON ${turnOn.size()} devices"
 	turnOn.each {s -> 
-        log.debug "Turning on ${s}"
+        log.debug "Turning ON ${s}"
         s.on()
     }
 }
 
 def turnOffDevices(turnOff) {
+    log.debug "Turning OFF ${turnOff.size()} devices"
 	turnOff.each { s -> 
-        log.debug "Turning off ${s}"
+        log.debug "Turning OFF ${s}"
         s.off()
     }
 }
