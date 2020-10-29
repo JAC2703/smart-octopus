@@ -51,6 +51,9 @@ preferences {
 	}
 }
 
+def getApiBase() { return "https://api.octopus.energy" }
+def getApiPricingCall() { return "${getApiBase()}/v1/products/AGILE-18-02-21/electricity-tariffs/E-1R-AGILE-18-02-21-${settings.elecRegion}/standard-unit-rates/" }
+
 def elecRegions() {
     // If anyone knows how to get the value of an enum, and not it's index... call me. Otherwise we're doing this. 
     return ["A": "A", "B": "B", "C": "C", "D": "D", "E": "E", "F": "F", "G": "G", "H": "H", "I": "I", "J": "J", "K": "K", "L": "L", "M": "M"]
@@ -158,9 +161,9 @@ def processGetPrices() {
 def getPricesFromAPI() {
     def dateFrom = new Date().format("yyyy-MM-dd'T'HH:'00Z'", TimeZone.getTimeZone('UTC'))
     log.debug "Getting prices from API from ${dateFrom}"
-    
-    def url = "https://api.octopus.energy/v1/products/AGILE-18-02-21/electricity-tariffs/E-1R-AGILE-18-02-21-${settings.elecRegion}/standard-unit-rates/?period_from=${dateFrom}"
-    
+
+    def url = "${getApiPricingCall()}?period_from=${dateFrom}"
+
     def resp = requestGET(url)
     
     if (resp.status == 200) {
@@ -219,7 +222,7 @@ def checkPrices() {
             def turnOff = []
             
             state.switches.each { s -> 
-            	def thresholdPrice = s.value
+                def thresholdPrice = s.value
                 def device = findDevice(s.key)
                 if(thresholdPrice >= state.agileCurrentPrice){
                     log.debug "Setting device ${device} ON as price ${state.agileCurrentPrice} is below threshold ${thresholdPrice}"
