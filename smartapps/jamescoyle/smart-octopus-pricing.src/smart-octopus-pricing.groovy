@@ -323,8 +323,8 @@ def turnOnDevices(turnOn) {
     log.debug "Ensuring ${turnOn.size()} device(s) are ON"
 	turnOn.each {s -> 
         if(!s.latestValue("switch").contains('on')) {
-        	log.debug "Turning ON ${s} from ${s.latestValue("switch").capitalize()}"
-        	s.on()
+            log.debug "Turning ON ${s} from ${s.latestValue("switch")}"
+            s.on()
         }
     }
 }
@@ -333,7 +333,7 @@ def turnOffDevices(turnOff) {
     log.debug "Ensuring ${turnOff.size()} device(s) are OFF"
 	turnOff.each { s -> 
         if(!s.latestValue("switch").contains('off')) {
-            log.debug "Turning OFF ${s} from ${s.latestValue("switch").capitalize()}"
+            log.debug "Turning OFF ${s} from ${s.latestValue("switch")}"
             s.off()
         }
     }
