@@ -13,20 +13,39 @@
  *  Smart Octopus Pricing
  *
  *  Author: James Coyle
- *  Date: 2020-10-29
- *
- *  2020-10-29 Smartthings does not support custom tiles currently, development on displaying price is paused.
+ *  Date: 2020-11-02    Basic virtual device to be used for representing price levels (on = price within threshold)
+ * 
  */
 
 metadata {
-	definition(name: "Octopus Agile Pricing", namespace: "jamescoyle", author: "James Coyle", vid: "generic-switch") {
+    definition (name: "octopus-agile-pricing", namespace: "jamescoyle", author: "James Coyle") {
+        capability "Actuator"
+        capability "Sensor"
+        capability "Switch"
+    }
+    
+	tiles(scale: 2) {
+        standardTile("switch", "device.switch", width: 2, height: 2, canChangeIcon: true) {
+			state "off", label: 'Off', action: "switch.on", icon: "st.switches.switch.off", backgroundColor: "#ffffff", defaultState: true
+			state "on", label: 'On', action: "switch.off", icon: "st.switches.switch.on", backgroundColor: "#00A0DC"
+		}
+
+		main "switch"
+		details "switch"
 	}
 }
 
-def installed() {
-    log.info "INSTALLED"
+def parse(description) {
 }
 
-def update(price) {
+def on() {
+    sendEvent(name: "switch", value: "on")
+}
 
+def off() {
+    sendEvent(name: "switch", value: "off")
+}
+
+def installed() {
+    //log.debug "Installed"
 }
