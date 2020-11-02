@@ -13,10 +13,14 @@
  *  Smart Octopus Pricing
  *
  *  Author: James Coyle
- *  Date: 2020-10-28
  *
- *  2020-10-28 Implemented ability to get pricing data with basic app framework 
- *  2020-10-29 3 levels of price categories. Plunge (<= 0.00), Cheap (user set pricing) and Regular (user set pricing)
+ *  2020-10-28    Implemented ability to get pricing data with basic app framework 
+ *  2020-10-29    3 levels of price categories. Plunge (<= 0.00), Cheap (user set pricing) and Regular (user set pricing)
+ *  2020-10-31    Switches will be ignored from automation if they have been manually switched outside of automation. ST doesn't provide a way of capturing if the app or user makes the request
+                  so it's implemented as a work around by adding the device to a list when the app triggers an event. The event handle then removes from the list and knows the event isn't user generated.
+                  If a switch is manually turned on, it will not be turned off automatically. If the switch is then manually turned back off it will then be included in future automations.
+    2020-11-01    Added 4th level of switches. Renamed to low, medium, high and plunge pricing. 
+                  Added optional virtual devices for each pricing level
  */
 
 definition(
@@ -41,31 +45,75 @@ preferences {
 		input "plungeSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
         input "notifyPlunge", title: "Yes/ No?", "enum", options: ["Yes": "Yes", "No": "No"], defaultValue: "No", required: true
 	}
-    section("Cheap Pricing") {
+    section("Low Pricing") {
         input "cheapValue", "number", title: "When price is less than (x.xxp)", defaultValue: 5, required: true
 		input "cheapSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
 	}
-    section("Regular Pricing") {
-        input "regularValue", "number", title: "When price is less than (x.xxp)", defaultValue: 12, required: true
+    section("Medium Pricing") {
+        input "regularValue", "number", title: "When price is less than (x.xxp)", defaultValue: 10, required: true
 		input "regularSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
 	}
+    section("High Pricing") {
+        input "highValue", "number", title: "When price is less than (x.xxp)", defaultValue: 15, required: true
+		input "highSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
+	}
+    section("Add virtual devices for each pricing level?") {
+        paragraph "Virtual devices will be triggered by the above thresholds and can be used in Automations."
+        input "addVirtualDevices", title: "Yes/ No?", "enum", options: ["Yes": "Yes", "No": "No"], defaultValue: "No", required: true
+	}
+    section("Notes") {
+        paragraph "If you manually control a device that is chosen for automation (e.g. turn it on using the switch on the device) it will no longer be controlled by this app. To enable the app control again, manually set the device back to it's original state."
+    }
 }
 
 def getApiBase() { return "https://api.octopus.energy" }
 def getApiPricingCall() { return "${getApiBase()}/v1/products/AGILE-18-02-21/electricity-tariffs/E-1R-AGILE-18-02-21-${settings.elecRegion}/standard-unit-rates/" }
-def getDeviceIdPricing() { return "octo-agile-price-device" }
+def getChildDeviceId(n) { return "octopus-agile-pricing-" + n }
+def getChildDeviceName(n) { return "Octopus Agile Pricing " + n }
+def getChildDeviceTypeName() { return "octopus-agile-pricing" }
 
 def elecRegions() {
     // If anyone knows how to get the value of an enum, and not it's index... call me. Otherwise we're doing this. 
     return ["A": "A", "B": "B", "C": "C", "D": "D", "E": "E", "F": "F", "G": "G", "H": "H", "I": "I", "J": "J", "K": "K", "L": "L", "M": "M"]
 }
 
+def getAllSwitches(){
+    def switches = []
+    
+    if(plungeSwitches != null) {
+        switches.addAll(plungeSwitches)
+    }
+    
+    if(cheapSwitches != null) {
+        switches.addAll(cheapSwitches)
+    }
+    
+    if(regularSwitches != null) {
+        switches.addAll(regularSwitches)
+    }
+    
+    if(highSwitches != null) {
+        switches.addAll(highSwitches)
+    }
+    
+    if(addVirtualDevices == "Yes") {
+        def existingChildDevices = getChildDevices()
+    	switches.addAll(existingChildDevices)
+    }
+    
+    return switches
+}   
+
 def installed() {
 	log.debug "Installed with settings: ${settings}"
     
     initialize()
     
-    schedule("30 50 * * * ?", getPricesSchedule)
+    // randomise API call minute
+    def randMinute = Math.abs(new Random().nextInt() % 59) + 1
+    log.debug "Scheduling API call for '30 ${randMinute} * * * ?'"
+    
+    schedule("30 ${randMinute} * * * ?", getPricesSchedule)
     schedule("0 */30 * * * ?", checkPricesSchedule)
 }
 
@@ -75,14 +123,18 @@ def uninstalled() {
 
 def updated() {
 	log.debug "Updated with settings: ${settings}"
-    
+
     initialize()
 }
 
 def initialize() {
+    unsubscribe()
     setStates()
-    setSwitchRates()
+    
     createChildDevices()
+    
+    setSwitchRates()    
+    subscribeToSwitches()
     
     getPricesFirstTime()
     checkPricesFirstTime()
@@ -90,6 +142,8 @@ def initialize() {
 
 def setStates() {
     setStateValue('agilePrices', [])
+    setStateValue('deviceIgnoreList', [])
+    setStateValue('deviceIgnoreEventList', [:])
     setStateValue('agileCurrentPrice', 99)
     setStateValue('lastPlungeTurnedOff', false) // safety first and second
     setStateValue('lastPlungeFromDate', 'Unknown')
@@ -117,32 +171,108 @@ def setSwitchRates() {
         }
     }
     
-    if (regularSwitches != null) {
+    if(regularSwitches != null) {
         regularSwitches.each { s ->
             switches.put(s.getId(), regularValue)
         }
     }
-
+    
+    if(highSwitches != null) {
+        highSwitches.each { s ->
+            switches.put(s.getId(), highValue)
+        }
+    }
+    
+    if(addVirtualDevices == "Yes") {
+        def existingChildDevices = getChildDevices()
+        existingChildDevices.each { c ->
+            switch (c.deviceNetworkId) {
+                case getChildDeviceId("plunge"):
+                    switches.put(c.id, 0)
+                    break
+                    
+                case getChildDeviceId("low"):
+                    switches.put(c.id, cheapValue)
+                    break
+                    
+                case getChildDeviceId("medium"):
+                    switches.put(c.id, regularValue)
+                    break
+                    
+                case getChildDeviceId("high"):
+                    switches.put(c.id, highValue)
+                    break
+            }
+        }
+    }
+    
     state.switches = switches
     
-    log.info "${switches.size()} switches added"
+    log.info "${switches.size()} switches added for automation"
 }
 
 def createChildDevices() {
     def existingChildDevices = getChildDevices()
-    
-    if(existingChildDevices.size() > 0) {
-        removeChildDevices()
-    }
-    
-    //def priceDevice =  addChildDevice(app.namespace, "Octopus Agile Pricing", getDeviceIdPricing(), null, ["name": "Octopus Agile Pricing", "label": "Octopus Agile Pricing", "completedSetup": true])
-    //log.info "Created child device handler for price {$priceDevice}"
 
+    if(addVirtualDevices == "Yes") {
+        if(existingChildDevices.size() > 0) {
+            log.debug "Child devices already exist"
+        }
+        else {
+            log.info "Creating child virtual devices"
+
+            createChildDevice("plunge", "Plunge")
+            createChildDevice("low", "Low")
+            createChildDevice("medium", "Medium")
+            createChildDevice("high", "High")
+        }
+    }
+    else{
+        if(existingChildDevices.size() > 0) {
+            log.debug "Removing child devices"
+        	removeChildDevices()
+        }
+    }
 }
 
-private removeChildDevices() {
+def createChildDevice(appendId, appendName) {
+    def id = getChildDeviceId(appendId)
+    def name = getChildDeviceName(appendName)
+    
+    def priceDevice =  addChildDevice(app.namespace, getChildDeviceTypeName(), id, location.hubs[0].id, ["name": name, "label": name, "completedSetup": true])
+}
+
+def removeChildDevices() {
     getAllChildDevices().each { d ->
         deleteChildDevice(d.deviceNetworkId)
+    }
+}
+
+/* Subscriptions */
+def subscribeToSwitches(){
+    def switches = getAllSwitches()
+    switches.each { s -> 
+        subscribe(s, "switch", manualSwitchHandler)
+    }    
+    
+    log.debug "Subscribed to ${switches.size()} devices"
+}
+
+def manualSwitchHandler(evt) {
+    def device = findDevice(evt.deviceId)
+    
+    def automationTrigger = state.deviceIgnoreEventList.remove(device.id)
+    if(automationTrigger == null) {
+        // If device isn't in the list then it's controlled with automation. 
+        def deviceInIgnoreList = state.deviceIgnoreList.remove(evt.deviceId)
+        if(deviceInIgnoreList == false){
+            log.info "Manual event detected for '${device}' and will be ignored in automation"
+            state.deviceIgnoreList.add(evt.deviceId)
+        }
+        else{
+            // No need to remove deviceId from list as it's already removed as part of the check
+            log.info "Manual event detected for '${device}' and will be included in automation"
+        }
     }
 }
 
@@ -166,7 +296,7 @@ def getPricesSchedule() {
         processGetPrices()
     }
     else{
-        log.debug "${state.agilePrices.size()} price data is already in cache"
+        log.debug "${state.agilePrices.size()} price data items are already in cache"
     }
 }
 
@@ -192,7 +322,7 @@ def getPricesFromAPI() {
 
     def resp = requestGET(url)
     
-    if (resp.status == 200) {
+    if(resp.status == 200) {
         return resp.data
     } 
     else {
@@ -249,12 +379,16 @@ def checkPrices() {
             state.switches.each { s -> 
                 def thresholdPrice = s.value
                 def device = findDevice(s.key)
-                if(thresholdPrice >= state.agileCurrentPrice){
-                    log.debug "Setting device ${device} ON as price ${state.agileCurrentPrice} is below threshold ${thresholdPrice}"
+                if(device == null) {
+                    log.warn "Device ${s.key} has been deleted. Please refresh the app"
+                    //runOnce(new Date(), initialize)
+                }
+                else if(thresholdPrice >= state.agileCurrentPrice){
+                    log.debug "Setting device ${s.key}:${device} ON as price ${state.agileCurrentPrice} is below threshold ${thresholdPrice}"
                     turnOn.add(device)
                 }
                 else{
-                    log.debug "Setting device ${device} OFF as price ${state.agileCurrentPrice} is above threshold ${thresholdPrice}"
+                    log.debug "Setting device ${s.key}:${device} OFF as price ${state.agileCurrentPrice} is above threshold ${thresholdPrice}"
                     turnOff.add(device)
                 }
             }
@@ -293,38 +427,27 @@ def requestGET(path) {
 	}
 }
 
-/* TODO This is clunky and should be refactored. 
- * It seems there isn't a way to look up a device from a single 'master' list (unless joining)
- */ 
 def findDevice(id) {
-    if(plungeSwitches != null) {
-        def p = plungeSwitches.find{ it.id == id }
-        if(p != null) {
-            return p
-        }
-    }
-    
-    if (cheapSwitches != null) {
-        def c = cheapSwitches.find{ it.id == id }
-        if(c != null) {
-            return c
-        }
-    }
-    
-    if (regularSwitches != null) {
-        def r = regularSwitches.find{ it.id == id }
-        if(r != null) {
-            return r
-        }
+    // Not ideal, using join to return new array list of all switches
+    def switches = getAllSwitches()
+    def p = switches.find{ it.id == id }
+    if(p != null) {
+        return p
     }
 }
 
 def turnOnDevices(turnOn) {
     log.debug "Ensuring ${turnOn.size()} device(s) are ON"
 	turnOn.each {s -> 
-        if(!s.latestValue("switch").contains('on')) {
-            log.debug "Turning ON ${s} from ${s.latestValue("switch")}"
-            s.on()
+        if(state.deviceIgnoreList.contains(s.id)) {
+            log.info "Device ${s} has been excluded from automation by manually using the device"
+        }
+        else {
+            if(s.latestValue("switch") == null || !s.latestValue("switch").contains('on')) {
+                log.debug "Turning ON ${s} from ${s.latestValue("switch")}"
+                state.deviceIgnoreEventList.put(s.id, "ON")
+                s.on()
+            }
         }
     }
 }
@@ -332,13 +455,21 @@ def turnOnDevices(turnOn) {
 def turnOffDevices(turnOff) {
     log.debug "Ensuring ${turnOff.size()} device(s) are OFF"
 	turnOff.each { s -> 
-        if(!s.latestValue("switch").contains('off')) {
-            log.debug "Turning OFF ${s} from ${s.latestValue("switch")}"
-            s.off()
+        if(state.deviceIgnoreList.contains(s.id)) {
+            log.info "Device ${s} has been excluded from automation by manually using the device"
+        }
+        else {
+            if(s.latestValue("switch") == null || !s.latestValue("switch").contains('off')) {
+                log.debug "Turning OFF ${s} from ${s.latestValue("switch")}"
+                state.deviceIgnoreEventList.put(s.id, "OFF")
+                s.off()
+            }
         }
     }
 }
 
 def sendPlungeNotification(price){
-    sendNotification("Agile pricing is below £0.00 @ ${price}", [method: "push"])
+    if(notifyPlunge == "Yes") {
+    	sendNotification("Agile pricing is below £0.00 @ ${price}", [method: "push"])
+    }
 }
