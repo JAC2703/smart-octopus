@@ -1,5 +1,5 @@
 /**
- *  Copyright 2015 SmartThings
+ *  Copyright 2020 SmartThings
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  *  in compliance with the License. You may obtain a copy of the License at:
@@ -10,7 +10,7 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
- *  Smart Octopus Pricing
+ *  Smart Octopus Pricing for Octopus Agile
  *
  *  Author: James Coyle
  *
@@ -21,7 +21,11 @@
                   If a switch is manually turned on, it will not be turned off automatically. If the switch is then manually turned back off it will then be included in future automations.
     2020-11-01    Added 4th level of switches. Renamed to low, medium, high and plunge pricing. 
                   Added optional virtual devices for each pricing level
+    2020-11-05    Added variable price to get the best prices based on a set number of price periods. 
+    
  */
+ 
+import groovy.time.TimeCategory
 
 definition(
     name: "Smart Octopus Pricing",
@@ -57,8 +61,13 @@ preferences {
         input "highValue", "number", title: "When price is less than (x.xxp)", defaultValue: 15, required: true
 		input "highSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
 	}
+    section("Variable Pricing") {
+        paragraph "Caclulate the lowest price based on the below settings, then trigger devices based on the calculated price. Using 2 periods would result in using the 2 lowest price periods in a day. If multiple periods share the same price then the switch will be triggered the mutliple periods."
+        input "variablePeriods", "number", title: "Periods in calculation", defaultValue: 2, required: true
+		input "variableSwitches", "capability.switch", title: "Turn these devices on", multiple: true, required: false
+	}
     section("Add virtual devices for each pricing level?") {
-        paragraph "Virtual devices will be triggered by the above thresholds and can be used in Automations."
+        paragraph "Virtual devices will be triggered by the above thresholds and can be used as switches in Automations."
         input "addVirtualDevices", title: "Yes/ No?", "enum", options: ["Yes": "Yes", "No": "No"], defaultValue: "No", required: true
 	}
     section("Notes") {
@@ -68,6 +77,7 @@ preferences {
 
 def getApiBase() { return "https://api.octopus.energy" }
 def getApiPricingCall() { return "${getApiBase()}/v1/products/AGILE-18-02-21/electricity-tariffs/E-1R-AGILE-18-02-21-${settings.elecRegion}/standard-unit-rates/" }
+def getAgilePricingPublishedHour() { return 16 }
 def getChildDeviceId(n) { return "octopus-agile-pricing-" + n }
 def getChildDeviceName(n) { return "Octopus Agile Pricing " + n }
 def getChildDeviceTypeName() { return "octopus-agile-pricing" }
@@ -96,10 +106,14 @@ def getAllSwitches(){
         switches.addAll(highSwitches)
     }
     
+    if(variableSwitches != null) {
+        switches.addAll(variableSwitches)
+    }
+    
     if(addVirtualDevices == "Yes") {
         def existingChildDevices = getChildDevices()
     	switches.addAll(existingChildDevices)
-    }
+    }    
     
     return switches
 }   
@@ -111,9 +125,10 @@ def installed() {
     
     // randomise API call minute
     def randMinute = Math.abs(new Random().nextInt() % 59) + 1
+    def randSecond = Math.abs(new Random().nextInt() % 59) + 1
     log.debug "Scheduling API call for '30 ${randMinute} * * * ?'"
     
-    schedule("30 ${randMinute} * * * ?", getPricesSchedule)
+    schedule("${randSecond} ${randMinute} * * * ?", getPricesSchedule)
     schedule("0 */30 * * * ?", checkPricesSchedule)
 }
 
@@ -145,7 +160,7 @@ def setStates() {
     setStateValue('deviceIgnoreList', [])
     setStateValue('deviceIgnoreEventList', [:])
     setStateValue('agileCurrentPrice', 99)
-    setStateValue('lastPlungeTurnedOff', false) // safety first and second
+    setStateValue('agileBestVariablePrice', -99)
     setStateValue('lastPlungeFromDate', 'Unknown')
     setStateValue('lastPlungeToDate', 'Unknown')
 }
@@ -158,6 +173,7 @@ def setStateValue(s, v) {
 
 def setSwitchRates() {
     def switches = [:]
+    def variablePrice = getBestVariablePrice(new Date(), variableSwitches)
     
     if(plungeSwitches != null) {
         plungeSwitches.each { s ->
@@ -183,6 +199,14 @@ def setSwitchRates() {
         }
     }
     
+    if(variableSwitches != null) {
+        variableSwitches.each { s ->
+            if(!switches.containsKey(s.getId()) || (switches.containsKey(s.getId()) && switches.get(s.getId()) < variablePrice)){
+                switches.put(s.getId(), variablePrice)
+            }
+        }
+    }
+    
     if(addVirtualDevices == "Yes") {
         def existingChildDevices = getChildDevices()
         existingChildDevices.each { c ->
@@ -202,6 +226,10 @@ def setSwitchRates() {
                 case getChildDeviceId("high"):
                     switches.put(c.id, highValue)
                     break
+                    
+                case getChildDeviceId("variable"):
+                    switches.put(c.id, variablePrice)
+                    break
             }
         }
     }
@@ -215,16 +243,15 @@ def createChildDevices() {
     def existingChildDevices = getChildDevices()
 
     if(addVirtualDevices == "Yes") {
-        if(existingChildDevices.size() > 0) {
+        if(existingChildDevices.size() == 5) {
             log.debug "Child devices already exist"
         }
         else {
-            log.info "Creating child virtual devices"
-
-            createChildDevice("plunge", "Plunge")
-            createChildDevice("low", "Low")
-            createChildDevice("medium", "Medium")
-            createChildDevice("high", "High")
+            createChildDevice(existingChildDevices, "plunge", "Plunge")
+            createChildDevice(existingChildDevices, "low", "Low")
+            createChildDevice(existingChildDevices, "medium", "Medium")
+            createChildDevice(existingChildDevices, "high", "High")
+            createChildDevice(existingChildDevices, "variable", "Variable")
         }
     }
     else{
@@ -235,11 +262,17 @@ def createChildDevices() {
     }
 }
 
-def createChildDevice(appendId, appendName) {
+def createChildDevice(existingChildDevices, appendId, appendName) {
     def id = getChildDeviceId(appendId)
     def name = getChildDeviceName(appendName)
     
-    def priceDevice =  addChildDevice(app.namespace, getChildDeviceTypeName(), id, location.hubs[0].id, ["name": name, "label": name, "completedSetup": true])
+    def existingDevice = existingChildDevices.find { it.deviceNetworkId == id }
+    if (existingDevice == null) {
+        def priceDevice =  addChildDevice(app.namespace, getChildDeviceTypeName(), id, location.hubs[0].id, ["name": name, "label": name, "completedSetup": true])
+    }
+    else{
+        log.warn "Child device ${existingDevice} already exists"
+    }
 }
 
 def removeChildDevices() {
@@ -253,7 +286,7 @@ def subscribeToSwitches(){
     def switches = getAllSwitches()
     switches.each { s -> 
         subscribe(s, "switch", manualSwitchHandler)
-    }    
+    }
     
     log.debug "Subscribed to ${switches.size()} devices"
 }
@@ -286,17 +319,25 @@ def getPricesFirstTime() {
     else{
         log.debug "Skipping getting price data from API"
     }
-
 }
 
 def getPricesSchedule() {
     log.debug "Getting price data from API"
-
-    if(state.agilePrices.size() < 14) {
+    
+    def maxDate = new Date()
+    state.agilePrices.each { price ->
+        def fromDate = Date.parse("yyyy-MM-dd'T'HH:mm:ssz", price.valid_from.replaceAll('Z', '+0000'))
+        if (fromDate > maxDate) {
+            maxDate = fromDate
+        }
+    }
+    
+    // if it's after 1600 and maxDate is today then fetch newer prices
+    if(new Date().clearTime() > maxDate.clearTime() || (new Date().clearTime() == maxDate.clearTime() && new Date().getAt(Calendar.HOUR_OF_DAY) >= getAgilePricingPublishedHour())) {
         processGetPrices()
     }
     else{
-        log.debug "${state.agilePrices.size()} price data items are already in cache"
+        log.debug "${state.agilePrices.size()} price data items are already in cache and it's not time to fetch new pricing data"
     }
 }
 
@@ -305,17 +346,16 @@ def processGetPrices() {
     
     if(prices == []) {
         log.error "No price data returned from API. See previous errors."
-        state.agilePrices = []
     }
     else{
         log.debug "Fetched ${prices.results.size()} new pricing intervals"
         state.agilePrices = prices.results
     }
-
 }
 
 def getPricesFromAPI() {
-    def dateFrom = new Date().format("yyyy-MM-dd'T'HH:'00Z'", TimeZone.getTimeZone('UTC'))
+    def midnight = new Date().clearTime()
+    def dateFrom = midnight.format("yyyy-MM-dd'T'HH:'00Z'", TimeZone.getTimeZone('UTC'))
     log.debug "Getting price data from API from ${dateFrom}"
 
     def url = "${getApiPricingCall()}?period_from=${dateFrom}"
@@ -331,10 +371,51 @@ def getPricesFromAPI() {
     }
 }
 
+/* variable pricing */
+def getBestVariablePrice(date, periods) {
+    def priceList = [] 
+
+    def fromDateRange = date.clone()
+    use(TimeCategory) {
+        fromDateRange = (fromDateRange - 1.hours).clearTime()
+        fromDateRange = fromDateRange - 1.hours
+    }
+    
+    def toDateRange = new Date()
+    use(TimeCategory) {
+        toDateRange = (toDateRange - 1.hours).clearTime()
+        toDateRange = toDateRange - 1.hours + 1.days
+    }
+    
+    state.agilePrices.each { price ->
+        def fromDate = Date.parse("yyyy-MM-dd'T'HH:mm:ssz", price.valid_from.replaceAll('Z', '+0000'))
+        if (fromDate >= fromDateRange && fromDate < toDateRange) {
+            priceList.add(price.value_inc_vat)
+        }
+    }
+    
+    priceList = priceList.sort()
+    
+    if(settings.variablePeriods > 0 && priceList.size() >= settings.variablePeriods) {
+        def minPrice = priceList[settings.variablePeriods - 1]
+        
+        log.info "Minimum variable price is set to ${minPrice} between ${fromDateRange} and ${toDateRange} for ${settings.variablePeriods} out of ${priceList.size()} periods"
+        state.agileBestVariablePrice = minPrice
+        
+        return minPrice
+    }
+    else{
+        log.warn "Could not set minimum variable price using periods; ${settings.variablePeriods}, prices: ${priceList.size()} between ${fromDateRange} and ${toDateRange} for ${settings.variablePeriods} periods"
+        return -99
+    }    
+}
+
 
 /* check known prices and do stuff */
 def checkPricesFirstTime() {
     log.debug "Checking prices for the first time"
+    
+    state.deviceIgnoreList.clear()
 
     if(state.switches.size() > 0) {
         checkPrices()
@@ -352,17 +433,23 @@ def checkPricesSchedule() {
 def checkPrices() {
     log.debug "Checking current known prices for action"
     
-    Date date = new Date()
+    setSwitchRates()
     
     def removePrices = []
     state.agilePrices.each { price ->
         def fromDate = Date.parse("yyyy-MM-dd'T'HH:mm:ssz", price.valid_from.replaceAll('Z', '+0000'))
         def toDate = Date.parse("yyyy-MM-dd'T'HH:mm:ssz", price.valid_to.replaceAll('Z', '+0000'))
-        def currentDate = new Date()
+        def currentDate = new Date()        
         
         //log.debug "Checking ${currentDate} is between ${price.valid_from}...${fromDate} and ${price.valid_to}...${toDate}"
         
-        if(currentDate > toDate){
+        def removePeriodBefore = new Date()
+        use(TimeCategory) {
+            removePeriodBefore = (new Date() - 1.hours).clearTime()
+        	removePeriodBefore = removePeriodBefore - 1.hours
+        }
+    
+        if(fromDate < removePeriodBefore){
             removePrices.add(price)
         }
         else if(currentDate >= fromDate && currentDate < toDate) {
@@ -371,6 +458,10 @@ def checkPrices() {
             if(state.agileCurrentPrice != price.value_inc_vat) {
                 // There has been a price change!
                 state.agileCurrentPrice = price.value_inc_vat
+            }
+            else {
+                log.info "The prices hasn't changed so there is nothing to do @ ${price.value_inc_vat}"
+                //return
             }
             
             def turnOn = []
@@ -445,7 +536,7 @@ def turnOnDevices(turnOn) {
         else {
             if(s.latestValue("switch") == null || !s.latestValue("switch").contains('on')) {
                 log.debug "Turning ON ${s} from ${s.latestValue("switch")}"
-                state.deviceIgnoreEventList.put(s.id, "ON")
+                addDeviceToIgnoreList(s, "ON")
                 s.on()
             }
         }
@@ -461,10 +552,16 @@ def turnOffDevices(turnOff) {
         else {
             if(s.latestValue("switch") == null || !s.latestValue("switch").contains('off')) {
                 log.debug "Turning OFF ${s} from ${s.latestValue("switch")}"
-                state.deviceIgnoreEventList.put(s.id, "OFF")
+                addDeviceToIgnoreList(s, "OFF")
                 s.off()
             }
         }
+    }
+}
+
+def addDeviceToIgnoreList(s, val) {
+    if(s.typeName != getChildDeviceTypeName()) {
+    	state.deviceIgnoreEventList.put(s.id, val)
     }
 }
 
