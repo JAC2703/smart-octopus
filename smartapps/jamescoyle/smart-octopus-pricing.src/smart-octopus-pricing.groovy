@@ -72,6 +72,7 @@ preferences {
 	}
     section("Notes") {
         paragraph "If you manually control a device that is chosen for automation (e.g. turn it on using the switch on the device) it will no longer be controlled by this app. To enable the app control again, manually set the device back to it's original state."
+        paragraph "Sometimes the devices available for automation will get out of sync. Known problems are around rebooting the ST hub. To help with this, each time you save your settings in this app your ignore list will be cleared."
     }
 }
 
@@ -88,35 +89,69 @@ def elecRegions() {
 }
 
 def getAllSwitches(){
-    def switches = []
+    def switches = [:] // use to de-dupe
     
     if(plungeSwitches != null) {
-        switches.addAll(plungeSwitches)
+        plungeSwitches.each { s -> 
+            switches.put(s.id, s)
+        }
     }
     
     if(cheapSwitches != null) {
-        switches.addAll(cheapSwitches)
+        cheapSwitches.each { s -> 
+            switches.put(s.id, s)
+        }
     }
     
     if(regularSwitches != null) {
-        switches.addAll(regularSwitches)
+        regularSwitches.each { s -> 
+            switches.put(s.id, s)
+        }
     }
     
     if(highSwitches != null) {
-        switches.addAll(highSwitches)
+        highSwitches.each { s -> 
+            switches.put(s.id, s)
+        }
     }
     
     if(variableSwitches != null) {
-        switches.addAll(variableSwitches)
+        variableSwitches.each { s -> 
+            switches.put(s.id, s)
+        }
     }
     
     if(addVirtualDevices == "Yes") {
         def existingChildDevices = getChildDevices()
-    	switches.addAll(existingChildDevices)
+    	existingChildDevices.each { s -> 
+            switches.put(s.id, s)
+        }
     }    
     
-    return switches
+    return switches.values()
 }   
+
+/* round down to 2300hrs */
+def getFromDateTimePeriod() {
+    if(new Date().getAt(Calendar.HOUR_OF_DAY) == 23) {
+        def fromDate = new Date()
+        use(TimeCategory) {
+            fromDate = fromDate.clearTime()
+            fromDate = fromDate + 23.hours
+        }
+        
+        return fromDate
+    }
+    else {
+        def fromDate = new Date()
+        use(TimeCategory) {
+            fromDate = fromDate.clearTime()
+            fromDate = fromDate - 1.hours
+        }
+        
+        return fromDate
+    }
+}
 
 def installed() {
 	log.debug "Installed with settings: ${settings}"
@@ -146,6 +181,9 @@ def initialize() {
     unsubscribe()
     setStates()
     
+    atomicState.deviceIgnoreList = []
+    atomicState.deviceIgnoreEventList = [:]
+    
     createChildDevices()
     
     setSwitchRates()    
@@ -157,15 +195,24 @@ def initialize() {
 
 def setStates() {
     setStateValue('agilePrices', [])
-    setStateValue('deviceIgnoreList', [])
-    setStateValue('deviceIgnoreEventList', [:])
+    setAtomicStateValue('deviceIgnoreList', [])
+    setAtomicStateValue('deviceIgnoreEventList', [:])
     setStateValue('agileCurrentPrice', 99)
     setStateValue('agileBestVariablePrice', -99)
-    setStateValue('lastPlungeFromDate', 'Unknown')
-    setStateValue('lastPlungeToDate', 'Unknown')
+    
+    // diagnostics 
+    setStateValue('agileBestVariableFromDateRange', null)
+    setStateValue('agileBestVariableToDateRange', null)
+    setStateValue('agileBestVariableFromLastCalculated', null)
 }
 
 def setStateValue(s, v) {
+    if(!state.containsKey(s)){
+        state[s] = v
+    }
+}
+
+def setAtomicStateValue(s, v) {
     if(!state.containsKey(s)){
         state[s] = v
     }
@@ -284,8 +331,12 @@ def removeChildDevices() {
 /* Subscriptions */
 def subscribeToSwitches(){
     def switches = getAllSwitches()
+    
     switches.each { s -> 
-        subscribe(s, "switch", manualSwitchHandler)
+        if(s.typeName != getChildDeviceTypeName()) {
+            subscribe(s, "switch", manualSwitchHandler)
+            return
+        }
     }
     
     log.debug "Subscribed to ${switches.size()} devices"
@@ -293,18 +344,30 @@ def subscribeToSwitches(){
 
 def manualSwitchHandler(evt) {
     def device = findDevice(evt.deviceId)
-    
-    def automationTrigger = state.deviceIgnoreEventList.remove(device.id)
-    if(automationTrigger == null) {
-        // If device isn't in the list then it's controlled with automation. 
-        def deviceInIgnoreList = state.deviceIgnoreList.remove(evt.deviceId)
-        if(deviceInIgnoreList == false){
-            log.info "Manual event detected for '${device}' and will be ignored in automation"
-            state.deviceIgnoreList.add(evt.deviceId)
-        }
-        else{
-            // No need to remove deviceId from list as it's already removed as part of the check
-            log.info "Manual event detected for '${device}' and will be included in automation"
+
+    // only handle lists if device isn't a child device. Child devices ignore all manual overiding. 
+    if(device.typeName != getChildDeviceTypeName()) {
+        // check if the trigger for this event is from this app
+        def eventMap = atomicState.deviceIgnoreEventList
+        def automationTrigger = eventMap.remove(device.id)
+        // save map back to state
+        atomicState.deviceIgnoreEventList = eventMap
+        
+        if(automationTrigger == null) {
+            // If device isn't in the list then it's controlled with automation. 
+            def ignoreList = atomicState.deviceIgnoreList
+            if(ignoreList.contains(device.id)) {
+                log.info "Manual event detected for '${device}' and will be included in automation"
+                ignoreList.remove(device.id)
+            }
+            else{
+                log.info "Manual event detected for '${device}' and will be ignored in automation"
+                ignoreList.add(device.id)
+                
+            }
+            
+            // save map back to state
+            atomicState.deviceIgnoreList = ignoreList
         }
     }
 }
@@ -354,8 +417,9 @@ def processGetPrices() {
 }
 
 def getPricesFromAPI() {
-    def midnight = new Date().clearTime()
-    def dateFrom = midnight.format("yyyy-MM-dd'T'HH:'00Z'", TimeZone.getTimeZone('UTC'))
+    def fromDateRange = getFromDateTimePeriod()
+
+    def dateFrom = fromDateRange.format("yyyy-MM-dd'T'HH:'00Z'", TimeZone.getTimeZone('UTC'))
     log.debug "Getting price data from API from ${dateFrom}"
 
     def url = "${getApiPricingCall()}?period_from=${dateFrom}"
@@ -375,16 +439,11 @@ def getPricesFromAPI() {
 def getBestVariablePrice(date, periods) {
     def priceList = [] 
 
-    def fromDateRange = date.clone()
+    def fromDateRange = getFromDateTimePeriod()
+        
+    def toDateRange = getFromDateTimePeriod()
     use(TimeCategory) {
-        fromDateRange = (fromDateRange - 1.hours).clearTime()
-        fromDateRange = fromDateRange - 1.hours
-    }
-    
-    def toDateRange = new Date()
-    use(TimeCategory) {
-        toDateRange = (toDateRange - 1.hours).clearTime()
-        toDateRange = toDateRange - 1.hours + 1.days
+        toDateRange = toDateRange + 1.days
     }
     
     state.agilePrices.each { price ->
@@ -401,6 +460,9 @@ def getBestVariablePrice(date, periods) {
         
         log.info "Minimum variable price is set to ${minPrice} between ${fromDateRange} and ${toDateRange} for ${settings.variablePeriods} out of ${priceList.size()} periods"
         state.agileBestVariablePrice = minPrice
+        state.agileBestVariableFromDateRange = fromDateRange
+        state.agileBestVariableToDateRange = toDateRange
+        state.agileBestVariableFromLastCalculated = new Date()
         
         return minPrice
     }
@@ -415,8 +477,6 @@ def getBestVariablePrice(date, periods) {
 def checkPricesFirstTime() {
     log.debug "Checking prices for the first time"
     
-    state.deviceIgnoreList.clear()
-
     if(state.switches.size() > 0) {
         checkPrices()
     }
@@ -443,11 +503,7 @@ def checkPrices() {
         
         //log.debug "Checking ${currentDate} is between ${price.valid_from}...${fromDate} and ${price.valid_to}...${toDate}"
         
-        def removePeriodBefore = new Date()
-        use(TimeCategory) {
-            removePeriodBefore = (new Date() - 1.hours).clearTime()
-        	removePeriodBefore = removePeriodBefore - 1.hours
-        }
+        def removePeriodBefore = getFromDateTimePeriod()
     
         if(fromDate < removePeriodBefore){
             removePrices.add(price)
@@ -530,7 +586,7 @@ def findDevice(id) {
 def turnOnDevices(turnOn) {
     log.debug "Ensuring ${turnOn.size()} device(s) are ON"
 	turnOn.each {s -> 
-        if(state.deviceIgnoreList.contains(s.id)) {
+        if(atomicState.deviceIgnoreList.contains(s.id)) {
             log.info "Device ${s} has been excluded from automation by manually using the device"
         }
         else {
@@ -546,7 +602,7 @@ def turnOnDevices(turnOn) {
 def turnOffDevices(turnOff) {
     log.debug "Ensuring ${turnOff.size()} device(s) are OFF"
 	turnOff.each { s -> 
-        if(state.deviceIgnoreList.contains(s.id)) {
+        if(atomicState.deviceIgnoreList.contains(s.id)) {
             log.info "Device ${s} has been excluded from automation by manually using the device"
         }
         else {
@@ -561,7 +617,10 @@ def turnOffDevices(turnOff) {
 
 def addDeviceToIgnoreList(s, val) {
     if(s.typeName != getChildDeviceTypeName()) {
-    	state.deviceIgnoreEventList.put(s.id, val)
+        def map = atomicState.deviceIgnoreEventList
+    	map.put(s.id, val)
+        // save map back to state
+        atomicState.deviceIgnoreEventList = map;
     }
 }
 
